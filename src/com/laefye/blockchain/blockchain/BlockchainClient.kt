@@ -1,104 +1,124 @@
 package com.laefye.blockchain.blockchain
 
+import com.laefye.blockchain.blockchain.db.Blockchain
 import com.laefye.blockchain.network.FurProtoImpl
 import com.laefye.blockchain.network.Header
 import com.laefye.blockchain.network.Identifier
 import com.laefye.blockchain.network.Node
-import com.laefye.blockchain.network.exceptions.NetworkException
-import java.net.URI
-import kotlin.system.exitProcess
 
 class BlockchainClient(val node: Node) {
-    val blockchain = Blockchain()
-    var syncing = false
+
+    val blockchain = Blockchain("blockchain.db")
+    init {
+        blockchain.init()
+    }
+
+    private var syncing = false
 
     fun handle(header: Header, protocol: FurProtoImpl, any: Any?) {
-        if (any is Command.Mined) {
-            if (blockchain.blocks.last().hash().contentEquals(any.previous)) {
-                val block = Block(
-                    any.nonce,
-                    any.previous,
-                    any.height,
-                )
-                block.transactions.addAll(any.transactions)
-                if (block.validate()) {
-                    blockchain.blocks.add(block)
-                    println("${header.id} Mined new block")
-                    for (i in node.peers) {
-                        val friend = node.connect(i.value, i.key)
-                        friend.writeMessage(Command.Mined(block.height, block.transactions, block.nonce, block.previous))
-                        friend.close()
-                    }
+        when (any) {
+            is Command.GetBlockchainState -> {
+                protocol.writeMessage(Command.BlockchainState(blockchain.getLastBlock()?.height ?: 0, syncing))
+            }
+            is Command.LookupBlock -> {
+                val block = blockchain.lookupBlock(any.height)
+                protocol.writeMessage(Command.SentBlock(block))
+            }
+            is Command.Mined -> {
+                if (syncing) return
+                val lastBlock = blockchain.getLastBlock()
+                if (lastBlock == null) {
+                    println("Someone Mined Genesis Block ${any.block}")
+                    blockchain.storeBlock(any.block)
+                    broadcastMineBlock(any.block)
+                } else if (any.block.previous.contentEquals(lastBlock.hash) && any.block.validate()) {
+                    println("Someone Mined Block ${any.block}")
+                    blockchain.storeBlock(any.block)
+                    broadcastMineBlock(any.block)
                 }
             }
-        } else if (any is Command.GetBlockchainState) {
-            protocol.writeMessage(Command.BlockchainState(blockchain.blocks.last().height, syncing))
-        } else if (any is Command.LookupBlock) {
-            protocol.writeMessage(Command.Block(
-                blockchain.blocks.last().height,
-                blockchain.blocks[any.height].height,
-                blockchain.blocks[any.height].transactions,
-                blockchain.blocks[any.height].nonce,
-                blockchain.blocks[any.height].previous,
-            ))
+        }
+    }
+
+    private fun broadcastMineBlock(block: Block) {
+        for (peer in node.peers) {
+            val protocol = node.connect(peer.value, peer.key)
+            protocol.writeMessage(Command.Mined(block))
+            protocol.close()
         }
     }
 
     fun mine(transaction: List<Transaction>) {
-        val block = Block(0, blockchain.blocks.last().hash(), blockchain.blocks.last().height + 1)
-        block.transactions.addAll(transaction)
-        println("Mining ${block.height}")
+        val lastBlock = blockchain.getLastBlock()
+        val block = Block(0, lastBlock?.hash ?: byteArrayOf(), (lastBlock?.height ?: 0) + 1, transaction.toMutableList())
+        println("Started mining (previous ${lastBlock?.hash?.toHexString()}")
         block.mine()
-        println("Mined ${block.hash().toHexString()}")
-        blockchain.blocks += block
-        try {
-            for (i in node.peers) {
-                val protocol = node.connect(i.value, i.key)
-                protocol.writeMessage(Command.Mined(block.height, block.transactions, block.nonce, block.previous))
-                protocol.close()
+        println("I mined $block ${block.hash.toHexString()}")
+        blockchain.storeBlock(block)
+        broadcastMineBlock(block)
+    }
+
+    private fun getPeerMaximalHeight(): Identifier? {
+        var id: Identifier? = null
+        var height = 0
+        for (peer in node.peers) {
+            val protocol = node.connect(peer.value, peer.key)
+            val state = getBlockchainState(protocol)
+            protocol.close()
+            if (state == null) {
+                continue
             }
-        } catch (e: NetworkException) {
-            if (e.message != NetworkException.NOT_CONNECTED) {
-                throw e
+            if (state.height > height) {
+                height = state.height
+                id = peer.key
             }
         }
+        return id
+    }
+
+    private fun getBlockchainState(protocol: FurProtoImpl): Command.BlockchainState? {
+        protocol.writeMessage(Command.GetBlockchainState())
+        val state = protocol.readMessage()
+        if (state !is Command.BlockchainState || state.syncing) {
+            return null
+        }
+        return state
+    }
+
+    fun lookupBlock(protocol: FurProtoImpl, height: Int): Block? {
+        protocol.writeMessage(Command.LookupBlock(height))
+        val state = protocol.readMessage()
+        if (state !is Command.SentBlock) {
+            return null
+        }
+        return state.block
+    }
+
+    fun syncFromNode(id: Identifier) {
+        val protocol = node.connectById(id)
+        var currentHeight = blockchain.getLastBlock()?.height ?: 0
+        var state = getBlockchainState(protocol)!!
+        while (state.height != currentHeight) {
+            for (i in currentHeight+1..state.height) {
+                val block = lookupBlock(protocol, i)
+                if (block != null) {
+                    println("Syncing: Added $block")
+                    blockchain.storeBlock(block)
+                    currentHeight = i
+                }
+            }
+            state = getBlockchainState(protocol)!!
+        }
+        protocol.close()
     }
 
     fun sync() {
         syncing = true
-        var top = 0
-        var id: Identifier? = null
-        var uri: URI? = null
-        for (i in node.peers) {
-            val protocol = node.connect(i.value, i.key)
-            protocol.writeMessage(Command.GetBlockchainState())
-            val state = protocol.readMessage()
-            protocol.close()
-            if (state !is Command.BlockchainState || state.syncing) {
-                continue
-            }
-            if (state.height >= top) {
-                top = state.height
-                id = i.key
-                uri = i.value
-            }
-        }
-        if (id != null && uri != null) {
-            val protocol = node.connect(uri, id)
-            for (i in blockchain.blocks.last().height..top) {
-                protocol.writeMessage(Command.LookupBlock(i))
-                val result = protocol.readMessage()
-                if (result !is Command.Block) {
-                    continue
-                }
-                val block = Block(result.nonce, result.previous, result.height)
-                block.transactions.addAll(result.transactions)
-                if (!block.validate()) {
-                    continue
-                }
-                blockchain.blocks.add(block)
-            }
-            protocol.close()
+        val maximalPeer = getPeerMaximalHeight()
+        if (maximalPeer != null) {
+            println("Started syncing")
+            syncFromNode(maximalPeer)
+            println("Stopped syncing")
         }
         syncing = false
     }

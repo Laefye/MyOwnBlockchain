@@ -8,9 +8,8 @@ open class Command : Serializable {
 
     class BlockchainState(val height: Int, val syncing: Boolean) : Command()
 
-    class Mined(val height: Int, val transactions: List<Transaction>, val nonce: Int, val previous: ByteArray) : Command()
+    class Mined(val block: Block) : Command()
 
     class LookupBlock(val height: Int) : Command()
-
-    class Block(val currentHeight: Int, val height: Int, val transactions: List<Transaction>, val nonce: Int, val previous: ByteArray) : Command()
+    class SentBlock(val block: Block?) : Command()
 }

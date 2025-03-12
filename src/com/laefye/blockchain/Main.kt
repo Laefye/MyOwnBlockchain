@@ -53,7 +53,7 @@ fun main(args: Array<String>) {
             node.connectPeer(URI.create(command[1]), Identifier.fromString(command[2]))
         }
         if (command[0] == "mine") {
-            blockchainClient.mine(listOf(Transaction(command[1], 1234)))
+            blockchainClient.mine(listOf(Transaction(command[1], System.currentTimeMillis())))
         }
         if (command[0] == "sync") {
             blockchainClient.sync()

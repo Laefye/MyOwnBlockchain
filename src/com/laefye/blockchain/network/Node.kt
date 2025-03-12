@@ -10,6 +10,11 @@ class Node(val profile: Profile, private val connectManager: ConnectManager, val
     }
 
     val peers = mutableMapOf<Identifier, URI>()
+    private val events = mutableListOf<NodeEventListener>()
+
+    fun addEvent(event: NodeEventListener) {
+        events.add(event)
+    }
 
     private var handler: ((Header, FurProtoImpl, Any?) -> Unit)? = null
 
@@ -68,13 +73,8 @@ class Node(val profile: Profile, private val connectManager: ConnectManager, val
         Thread(connectManager::listen).start()
         Thread {
             while (!connectManager.isClosed) {
-                try {
-                    refresh()
-                } catch (e: NetworkException) {
-                    if (e.message != NetworkException.NOT_CONNECTED) {
-                        throw e
-                    }
-                }
+                refresh()
+                events.forEach { it.postRefresh(this) }
                 Thread.sleep(1000)
             }
         }.start()
@@ -129,21 +129,37 @@ class Node(val profile: Profile, private val connectManager: ConnectManager, val
         var size = 0
         while (size != peers.size) {
             size = peers.size
-            val nearest = getNearest(profile.id, peers.keys)!!
+            val nearest = getNearest(profile.id, peers.keys) ?: continue
             val uri = peers[nearest]!!
-            val protocol = connect(uri, nearest)
-            for (node in getNodes(protocol)) {
-                if (node.key != profile.id) {
-                    peers[node.key] = node.value
+            try {
+                val protocol = connect(uri, nearest)
+                for (node in getNodes(protocol)) {
+                    if (node.key != profile.id) {
+                        peers[node.key] = node.value
+                    }
+                }
+                protocol.close()
+            } catch (e: NetworkException) {
+                if (e.message != NetworkException.NOT_CONNECTED) {
+                    throw e
+                } else {
+                    peers.remove(nearest)
                 }
             }
-            protocol.close()
         }
         val nearest = getNearest(profile.id, peers.keys)
         if (nearest != null) {
-            val protocol = connect(peers[nearest]!!, nearest)
-            store(protocol, me)
-            protocol.close()
+            try {
+                val protocol = connect(peers[nearest]!!, nearest)
+                store(protocol, me)
+                protocol.close()
+            } catch (e: NetworkException) {
+                if (e.message != NetworkException.NOT_CONNECTED) {
+                    throw e
+                } else {
+                    peers.remove(nearest)
+                }
+            }
         }
     }
 

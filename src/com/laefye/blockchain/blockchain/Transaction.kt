@@ -6,7 +6,6 @@ data class Transaction(
     val text: String,
     val timestamp: Long,
 ) : Serializable {
-    fun hash(): ByteArray {
-        return Hash.hash("$text - $timestamp")
-    }
+    val hash: ByteArray
+        get() = Hash.hash("$text - $timestamp")
 }

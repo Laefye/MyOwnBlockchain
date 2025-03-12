@@ -30,3 +30,8 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+# Blockchain
+blockchain.db
+profile.key
+profile-public.key
